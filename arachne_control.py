@@ -21,9 +21,12 @@
 # FIXED: the new motor is 995 instead of 996.  Doesn't move smoothly.  But only in Joystick mode???
 
 import pygame
+import cv2 as cv
+import threading
+
 import maestro_extended
 import time
-import numpy as np
+import networking.client as Client
 
 
 class ArachneController:
@@ -37,6 +40,12 @@ class ArachneController:
         self.j = pygame.joystick.Joystick(0)  # Assume we only have 1
         self.clock = pygame.time.Clock()
         self.j.init()
+        if self.j.get_init():
+            print("Joystick Ready!")
+
+        self.autonomous = False  # teleop mode for default
+        self.pause_event = threading.Event()
+
 
         # Initializing all leg ids
         self.all_legs = (2, 3, 4, 5, 1, 0)
@@ -67,7 +76,7 @@ class ArachneController:
             # Left Side
 
             [704, 1904, -1, 1468.25, 90, 832.0, 999],  # 9
-            [526, 1034, 1, 868, 45, 1968, 999],  # 10. #FIXME: replaced Servo, needs new Cal
+            [496, 1216, 1, 807, 45, 1216, 999],  # 10. #FIXME: replaced Servo, needs new Cal
             [1248, 2080, 1, 1450.00, 45, 2031, 999],  # 11   # was x, x, 1550
 
             [608, 1760, -1, 1615, 90, 784.0, 999],  # 12
@@ -77,39 +86,6 @@ class ArachneController:
             [608, 1904, -1, 1734.0, 90, 803.0, 999],  # 15
             [1232, 1952, 1, 1504.0, 45, 1952, 999],  # 16
             [848, 1312, 1, 1156, -45, 848, 999],  # 17
-        ]
-        self.m_limits_2 = [
-
-            # Right Side
-
-            # FIXME: Not using min/max right now.  Do I need to?
-
-            [608, 1920, 1, 831, 90, 1773.5, 999],
-            # min, max, direction, nominal [0 degrees], setting [calibrated], calibrated angle. slope [calc'd later]
-            [704, 1392, -1, 964, -45, 1392, 999],  # 1
-            [1248, 1840, 1, 1380, -45, 1840, 999],  # 2
-
-            [64, 1136, -1, 1040, 38, 646.25, 999],  # 3
-            [800, 1840, -1, 1160, -45, 1643.0, 999],  # 4
-            [1568, 2496, 1, 1901.25, 45, 2189.5, 999],  # 5
-
-            [800, 2096, 1, 1250.0, 90, 1976.25, 999],  # 6
-            [800, 1504, -1, 1022, -45, 1668.0, 999],  # 7
-            [736, 1632, -1, 1320.0, -90, 1931.75, 999],  # 8
-
-            # Left Side
-
-            [704, 1904, -1, 1468.25, 90, 832.0, 999],  # 9
-            [1088, 1840, 1, 1600, -45, 929.25, 999],  # 10
-            [1248, 2080, 1, 1470.00, -90, 974.75, 999],  # 11
-
-            [608, 1760, -1, 1615, 90, 784.0, 999],  # 12
-            [752, 1600, 1, 1414.25, -45, 891.75, 999],  # 13
-            [1008, 2000, 1, 1556.75, 45, 1937.25, 999],  # 14
-
-            [608, 1904, -1, 1734.0, 90, 803.0, 999],  # 15
-            [1040, 1808, 1, 1427.0, -45, 1044, 999],  # 16
-            [848, 1504, 1, 1296, -45, 848, 999],  # 17
         ]
 
         self.L1, self.L2 = 85, 123  # mm  #FIXME: Measure better
@@ -211,9 +187,8 @@ class ArachneController:
             joint_nom = int(self.m_limits[servo_num][3] * self.MLS)
             self.servo.setTarget(servo_num, joint_nom)
 
-
     # MAIN METHOD
-    def start_ps4_ctrl(self):
+    def start_ps4_ctrl(self, socket):
         ###### PS4 Remote Control ######
         # consider using a dedicated library for ps4 controlling with pyPS4Controller
         # pip install pyPS4Controller
@@ -223,8 +198,12 @@ class ArachneController:
         muscle_up = False
         # busy = False
 
+        data = {"point": "NA"}
+        autonomousThread = threading.Thread(target=self.controller_mixin, args=data)
+        cap = cv.VideoCapture(0)
+
         while True:
-            self.clock.tick(30)  # Frame Rate = 30fps
+            self.clock.tick(10)  # Frame Rate = 10fps
 
             events = pygame.event.get()
             for event in events:
@@ -233,13 +212,24 @@ class ArachneController:
                     print(event.dict, event.joy, self.ps4_button[event.button], 'pressed')
                     # time.sleep(0.5)
                 elif event.type == pygame.JOYBUTTONUP:
+                    if event.dict['button'] == 2:  # triangle
+                        self.autonomous = not self.autonomous
+                        if self.autonomous and not autonomousThread.is_alive():
+                            autonomousThread.start()
+                        elif not self.autonomous: self.pause_event.clear()
+                        elif self.autonomous: self.pause_event.set()
+
+                        status = "on" if self.autonomous else "off"
+                        print(f"Toggling Autonomous, status is now {status}")
                     print(event.dict, event.joy, self.ps4_button[event.button], 'released')
                     # time.sleep(0.5)
-
             left_stick_x_axis = self.j.get_axis(0)
             left_stick_y_axis = -self.j.get_axis(1)
             right_stick_x_axis = self.j.get_axis(3)
             right_stick_y_axis = -self.j.get_axis(4)
+
+            exit = self.j.get_button(1)  # Circle
+
             arm_left_axis = (self.j.get_axis(2) + 1) / 2  # change (-1,1) to (0,1)
             arm_right_axis = (self.j.get_axis(5) + 1) / 2
 
@@ -251,46 +241,52 @@ class ArachneController:
             thresh1 = 0.9
             thresh2 = 0.99
 
-            # Turning
-            if not muscle_up and abs(right_stick_x_axis) > deadzone:
-                print("turning")
-                direction = right_stick_x_axis / abs(right_stick_x_axis)
-                self.crab_walk_turn(30 * direction)
-                turning = True
-            elif turning and abs(right_stick_y_axis) <= deadzone:
-                turning = False
+            if exit:
+                print("Exiting")
+                self.servo.close()
+                break
 
-            # Muscle-up
-            if not turning and abs(right_stick_y_axis) > deadzone:
-                # print("muscle_up", right_stick_y_axis)
-                self.legs_lift(self.all_legs, -30 * right_stick_y_axis)
-                muscle_up = True
-                # time.sleep(delay)
-            elif muscle_up and abs(right_stick_y_axis) <= deadzone:
-                self.legs_lift(self.all_legs, 0)
-                muscle_up = False
+            if not self.autonomous:
+                # Turning
+                if not muscle_up and abs(right_stick_x_axis) > deadzone:
+                    print("turning")
+                    direction = right_stick_x_axis / abs(right_stick_x_axis)
+                    self.crab_walk_turn(30 * direction)
+                    turning = True
+                elif turning and abs(right_stick_y_axis) <= deadzone:
+                    turning = False
 
-            # Walking
-            if not muscle_up and not turning and abs(left_stick_y_axis) > deadzone:
-                print("walking fwd/back")
-                if left_stick_y_axis > 0:
-                    self.crab_walk_2(0, 30, 1)
-                else:
-                    self.crab_walk_2(0, -30, 1)
+                # Muscle-up
+                if not turning and abs(right_stick_y_axis) > deadzone:
+                    # print("muscle_up", right_stick_y_axis)
+                    self.legs_lift(self.all_legs, -30 * right_stick_y_axis)
+                    muscle_up = True
+                    # time.sleep(delay)
+                elif muscle_up and abs(right_stick_y_axis) <= deadzone:
+                    self.legs_lift(self.all_legs, 0)
+                    muscle_up = False
 
-                walking = True
-            elif not muscle_up and not turning and abs(left_stick_x_axis) > deadzone:
-                print("walking left/right")
-                if left_stick_x_axis > 0:
-                    self.crab_walk_2(90, 30, 1)
-                else:
-                    self.crab_walk_2(90, 30, 1)
-                walking = True
-            elif walking and (abs(left_stick_y_axis) <= deadzone) and (abs(left_stick_x_axis) <= deadzone):
-                walking = False
+                # Walking
+                if not muscle_up and not turning and abs(left_stick_y_axis) > deadzone:
+                    print("walking fwd/back")
+                    if left_stick_y_axis > 0:
+                        self.crab_walk_2(0, 30, 1)
+                    else:
+                        self.crab_walk_2(0, -30, 1)
 
+                    walking = True
+                elif not muscle_up and not turning and abs(left_stick_x_axis) > deadzone:
+                    print("walking left/right")
+                    if left_stick_x_axis > 0:
+                        self.crab_walk_2(90, 30, 1)
+                    else:
+                        self.crab_walk_2(90, 30, 1)
+                    walking = True
+                elif walking and (abs(left_stick_y_axis) <= deadzone) and (abs(left_stick_x_axis) <= deadzone):
+                    walking = False
+            else:
+                Client.client_tick(cap, socket, data)
         # Cleanup
-        self.servo.close()
 
     # Movement Functions
     def legs_lift(self, legs, steps):
@@ -312,9 +308,11 @@ class ArachneController:
 
         target = int(joint_nom + angle * angle_scale)  # joint_dir*angle*SERVO_SCALE)
 
-        if self.debug: print("leg, joint, angle, joint_dir, joint_nom, target:", leg, joint, angle, joint_dir, joint_nom,
-                        target)
-        if self.debug: print("   limits: ", self.m_limits[servo_num][0] * self.MLS, self.m_limits[servo_num][1] * self.MLS)
+        if self.debug: print("leg, joint, angle, joint_dir, joint_nom, target:", leg, joint, angle, joint_dir,
+                             joint_nom,
+                             target)
+        if self.debug: print("   limits: ", self.m_limits[servo_num][0] * self.MLS,
+                             self.m_limits[servo_num][1] * self.MLS)
         if not wait_till_execute:
             self.servo.setTarget(servo_num, target)
         else:
@@ -390,3 +388,15 @@ class ArachneController:
 
             # legs_step_relative(turn_legs, 0, 0, 0, 30, False)
             # time.sleep(delay)
+
+    def controller_mixin(self, pt):  # points is a String to be parsed
+        # Pt Key:
+        # Formatted like {"point": ___}, Options are: "NA", "(_,_)" <- actual point
+        while True:
+            self.pause_event.wait()
+            if pt[0] == "NA":  # scanning for an object
+                print("TURN")
+                self.crab_walk_turn(10)
+            else:
+                print("CRAB WALK")
+                self.crab_walk_2(0, 30, 1)

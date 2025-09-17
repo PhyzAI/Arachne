@@ -1,8 +1,19 @@
 from arachne_control import ArachneController
+import socket
 
 if __name__ == "__main__":
+    ip = "192.168.68.76"  # replace with computers local ip
+    port = 5001
+
     controller = ArachneController(debug=False)
-    controller.start_ps4_ctrl()  # could consider a different method of control?
+
+    with (socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s):
+        s.connect((ip, port))
+        input("Start recording")
+        controller.start_ps4_ctrl(s)  # could consider a different method of control?
+
+
+
 
 # Brainstorming possible project goals:
 # - Developing a new method of control allowing for individual limb control like with an arcade button controller setup
